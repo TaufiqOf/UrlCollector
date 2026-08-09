@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
+
 import json
 import os
 import sys
 import traceback
+
 from ctypes.util import find_library
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from PySide6.QtCore import Qt, QUrl, Signal
-from PySide6.QtGui import QAction
+from PySide6.QtCore import Qt, QUrl, Signal, QSize
+from PySide6.QtGui import QAction, QIcon
+
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -25,8 +28,14 @@ from PySide6.QtWidgets import (
     QSplitter,
     QVBoxLayout,
     QWidget,
+    QStyle,
 )
-from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineScript
+
+from PySide6.QtWebEngineCore import (
+    QWebEnginePage,
+    QWebEngineScript,
+)
+
 from PySide6.QtWebEngineWidgets import QWebEngineView
 
 CAPTURE_PREFIX = "__XHR_CAPTURE__"
@@ -403,66 +412,264 @@ class XhrCollectorWindow(QMainWindow):
         root_layout.setContentsMargins(8, 8, 8, 8)
         root_layout.setSpacing(8)
 
-        back_action = QAction("Back", self)
+        style = self.style()
+
+        # ---------------------------------------------------------
+        # Helper: Linux theme icon + Qt fallback
+        # ---------------------------------------------------------
+
+        def theme_icon(name: str, fallback):
+            icon = QIcon.fromTheme(name)
+
+            if icon.isNull():
+                icon = style.standardIcon(fallback)
+
+            return icon
+
+        # ---------------------------------------------------------
+        # Navigation actions
+        # ---------------------------------------------------------
+
+        back_action = QAction(
+            theme_icon(
+                "go-previous",
+                QStyle.StandardPixmap.SP_ArrowBack,
+            ),
+            "Back",
+            self,
+        )
+        back_action.setToolTip("Back")
         back_action.triggered.connect(self.browser.back)
-        forward_action = QAction("Forward", self)
+
+        forward_action = QAction(
+            theme_icon(
+                "go-next",
+                QStyle.StandardPixmap.SP_ArrowForward,
+            ),
+            "Forward",
+            self,
+        )
+        forward_action.setToolTip("Forward")
         forward_action.triggered.connect(self.browser.forward)
-        reload_action = QAction("Reload", self)
+
+        reload_action = QAction(
+            theme_icon(
+                "view-refresh",
+                QStyle.StandardPixmap.SP_BrowserReload,
+            ),
+            "Reload",
+            self,
+        )
+        reload_action.setToolTip("Reload")
         reload_action.triggered.connect(self.browser.reload)
 
+        # ---------------------------------------------------------
+        # Navigation toolbar
+        # ---------------------------------------------------------
+
         toolbar = self.addToolBar("Navigation")
+
+        toolbar.setMovable(False)
+
+        # IMPORTANT:
+        # show icons only, not "Back Forward Reload"
+        toolbar.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonIconOnly
+        )
+
+        toolbar.setIconSize(QSize(20, 20))
+
         toolbar.addAction(back_action)
         toolbar.addAction(forward_action)
         toolbar.addAction(reload_action)
 
-        self.url_input = QLineEdit(self)
-        self.url_input.setPlaceholderText("Enter URL, e.g. https://example.com")
-        self.url_input.returnPressed.connect(self.navigate_to_input_url)
+        toolbar.addSeparator()
 
-        go_button = QPushButton("Go", self)
-        go_button.clicked.connect(self.navigate_to_input_url)
-        toolbar.addWidget(QLabel("URL:", self))
+        # ---------------------------------------------------------
+        # URL input
+        # ---------------------------------------------------------
+
+        self.url_input = QLineEdit(self)
+        self.url_input.setPlaceholderText(
+            "Enter URL, e.g. https://example.com"
+        )
+
+        self.url_input.returnPressed.connect(
+            self.navigate_to_input_url
+        )
+
+        # Let URL field stretch
+        self.url_input.setMinimumWidth(300)
+
         toolbar.addWidget(self.url_input)
+
+        # ---------------------------------------------------------
+        # Go button
+        # ---------------------------------------------------------
+
+        go_button = QPushButton(self)
+
+        go_button.setIcon(
+            theme_icon(
+                "go-jump",
+                QStyle.StandardPixmap.SP_ArrowForward,
+            )
+        )
+
+        go_button.setIconSize(QSize(18, 18))
+        go_button.setToolTip("Go")
+        go_button.setFixedSize(32, 30)
+
+        go_button.clicked.connect(
+            self.navigate_to_input_url
+        )
+
         toolbar.addWidget(go_button)
 
-        splitter = QSplitter(Qt.Orientation.Horizontal, self)
+        # ---------------------------------------------------------
+        # Main splitter
+        # ---------------------------------------------------------
+
+        splitter = QSplitter(
+            Qt.Orientation.Horizontal,
+            self,
+        )
+
         splitter.setChildrenCollapsible(False)
 
+        # ---------------------------------------------------------
+        # Left side
+        # ---------------------------------------------------------
+
         left_container = QWidget(self)
+
         left_layout = QVBoxLayout(left_container)
         left_layout.setContentsMargins(0, 0, 0, 0)
+
         left_layout.addWidget(self.browser)
 
+        # ---------------------------------------------------------
+        # Right side
+        # ---------------------------------------------------------
+
         right_container = QWidget(self)
+
         right_layout = QVBoxLayout(right_container)
         right_layout.setContentsMargins(8, 8, 8, 8)
         right_layout.setSpacing(8)
 
-        panel_title = QLabel("Captured XHR/Fetch URLs", self)
-        self.count_label = QLabel("Total: 0", self)
+        # ---------------------------------------------------------
+        # Right header
+        # ---------------------------------------------------------
+
+        header_layout = QHBoxLayout()
+
+        panel_title = QLabel(
+            "Captured XHR/Fetch URLs",
+            self,
+        )
+
+        self.count_label = QLabel(
+            "Total: 0",
+            self,
+        )
+
+        header_layout.addWidget(panel_title)
+        header_layout.addStretch()
+        header_layout.addWidget(self.count_label)
+
+        # ---------------------------------------------------------
+        # Captured request list
+        # ---------------------------------------------------------
 
         self.captured_list = QListWidget(self)
 
-        save_button = QPushButton("Save", self)
-        save_button.clicked.connect(self.save_events)
+        # ---------------------------------------------------------
+        # Bottom buttons
+        # ---------------------------------------------------------
 
-        clear_button = QPushButton("Clear", self)
-        clear_button.clicked.connect(self.clear_events)
+        buttons_layout = QHBoxLayout()
+        buttons_layout.addStretch()
 
-        right_layout.addWidget(panel_title)
-        right_layout.addWidget(self.count_label)
-        right_layout.addWidget(self.captured_list, 1)
-        right_layout.addWidget(save_button)
-        right_layout.addWidget(clear_button)
+        # Save button
+        save_button = QPushButton(self)
+
+        save_button.setIcon(
+            theme_icon(
+                "document-save",
+                QStyle.StandardPixmap.SP_DialogSaveButton,
+            )
+        )
+
+        save_button.setIconSize(QSize(18, 18))
+        save_button.setToolTip("Save captured requests")
+        save_button.setFixedSize(34, 34)
+
+        save_button.clicked.connect(
+            self.save_events
+        )
+
+        # Clear button
+        clear_button = QPushButton(self)
+
+        clear_button.setIcon(
+            theme_icon(
+                "edit-delete",
+                QStyle.StandardPixmap.SP_TrashIcon,
+            )
+        )
+
+        clear_button.setIconSize(QSize(18, 18))
+        clear_button.setToolTip("Clear captured requests")
+        clear_button.setFixedSize(34, 34)
+
+        clear_button.clicked.connect(
+            self.clear_events
+        )
+
+        buttons_layout.addWidget(save_button)
+        buttons_layout.addWidget(clear_button)
+
+        # ---------------------------------------------------------
+        # Assemble right side
+        # ---------------------------------------------------------
+
+        right_layout.addLayout(header_layout)
+
+        right_layout.addWidget(
+            self.captured_list,
+            1,
+        )
+
+        right_layout.addLayout(buttons_layout)
+
+        # ---------------------------------------------------------
+        # Splitter
+        # ---------------------------------------------------------
 
         splitter.addWidget(left_container)
         splitter.addWidget(right_container)
-        splitter.setSizes([1000, 400])
 
-        root_layout.addWidget(splitter, 1)
+        splitter.setSizes([
+            1000,
+            400,
+        ])
+
+        # ---------------------------------------------------------
+        # Main widget
+        # ---------------------------------------------------------
+
+        root_layout.addWidget(
+            splitter,
+            1,
+        )
+
         self.setCentralWidget(root)
 
-        self.browser.urlChanged.connect(self._sync_url_input)
+        # Synchronize browser URL
+        self.browser.urlChanged.connect(
+            self._sync_url_input
+        )
 
     def _sync_url_input(self, url: QUrl) -> None:
         self.url_input.setText(url.toString())
