@@ -6,7 +6,7 @@ import sys
 import traceback
 
 from ctypes.util import find_library
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -15,17 +15,23 @@ from PySide6.QtCore import Qt, QUrl, Signal, QSize
 from PySide6.QtGui import QAction, QIcon
 
 from PySide6.QtWidgets import (
+  QAbstractItemView,
     QApplication,
+  QDialog,
+  QDialogButtonBox,
     QFileDialog,
+  QHeaderView,
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QListWidget,
-    QListWidgetItem,
     QMainWindow,
+  QMenu,
     QMessageBox,
     QPushButton,
     QSplitter,
+  QTableWidget,
+  QTableWidgetItem,
+  QTextEdit,
     QVBoxLayout,
     QWidget,
     QStyle,
@@ -386,6 +392,27 @@ class XhrCollectorWindow(QMainWindow):
         self.resize(1400, 850)
 
         self.events: List[CaptureEvent] = []
+        self.table_columns = [
+          ("call_type", "Type", True),
+          ("status_code", "Status Code", True),
+          ("method", "Method", True),
+          ("url", "URL", True),
+          ("started_at", "Started At", False),
+          ("finished_at", "Finished At", False),
+          ("page", "Page", False),
+          ("status_text", "Status Text", False),
+          ("ok", "OK", False),
+          ("request_headers", "Request Headers", False),
+          ("request_body", "Request Body", False),
+          ("response_headers", "Response Headers", False),
+          ("response_body", "Response Body", False),
+          ("response_error", "Response Error", False),
+        ]
+        self.url_column_index = next(
+            index
+            for index, (key, _title, _is_default_visible) in enumerate(self.table_columns)
+            if key == "url"
+        )
 
         self.browser = QWebEngineView(self)
         self.page = CapturePage(self.browser)
@@ -395,7 +422,7 @@ class XhrCollectorWindow(QMainWindow):
         self._inject_capture_script()
         self._build_ui()
 
-        self.browser.setUrl(QUrl("https://example.com"))
+        self.browser.setUrl(QUrl("https://www.carrefour.es/"))
 
     def _inject_capture_script(self) -> None:
         script = QWebEngineScript()
@@ -578,11 +605,31 @@ class XhrCollectorWindow(QMainWindow):
         header_layout.addStretch()
         header_layout.addWidget(self.count_label)
 
+        self.columns_button = QPushButton("Columns", self)
+        self.columns_button.setToolTip("Show or hide table columns")
+        self.columns_button.clicked.connect(self._show_column_menu)
+        header_layout.addWidget(self.columns_button)
+
         # ---------------------------------------------------------
         # Captured request list
         # ---------------------------------------------------------
 
-        self.captured_list = QListWidget(self)
+        self.captured_table = QTableWidget(self)
+        self.captured_table.setColumnCount(len(self.table_columns))
+        self.captured_table.setHorizontalHeaderLabels([title for _, title, _ in self.table_columns])
+        self.captured_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.captured_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.captured_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.captured_table.setAlternatingRowColors(True)
+        self.captured_table.verticalHeader().setVisible(False)
+        header = self.captured_table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(self.url_column_index, QHeaderView.ResizeMode.Stretch)
+        header.setSectionsMovable(True)
+        self.captured_table.cellDoubleClicked.connect(self._open_event_details_for_row)
+
+        for column_index, (_key, _title, is_default_visible) in enumerate(self.table_columns):
+          self.captured_table.setColumnHidden(column_index, not is_default_visible)
 
         # ---------------------------------------------------------
         # Bottom buttons
@@ -637,7 +684,7 @@ class XhrCollectorWindow(QMainWindow):
         right_layout.addLayout(header_layout)
 
         right_layout.addWidget(
-            self.captured_list,
+          self.captured_table,
             1,
         )
 
@@ -673,6 +720,86 @@ class XhrCollectorWindow(QMainWindow):
 
     def _sync_url_input(self, url: QUrl) -> None:
         self.url_input.setText(url.toString())
+
+    def _show_column_menu(self) -> None:
+      menu = QMenu(self)
+      for column_index, (_key, title, _is_default_visible) in enumerate(self.table_columns):
+        action = menu.addAction(title)
+        action.setCheckable(True)
+        action.setChecked(not self.captured_table.isColumnHidden(column_index))
+        action.toggled.connect(
+          lambda checked, col=column_index: self.captured_table.setColumnHidden(col, not checked)
+        )
+      menu.exec(self.columns_button.mapToGlobal(self.columns_button.rect().bottomLeft()))
+
+    def _truncate(self, value: Optional[str], max_len: int = 120) -> str:
+      if value is None:
+        return ""
+      if len(value) <= max_len:
+        return value
+      return value[: max_len - 3] + "..."
+
+    def _column_value(self, event: CaptureEvent, key: str) -> str:
+      if key == "call_type":
+        return event.api.upper()
+      if key == "url":
+        return event.url
+      if key == "status_code":
+        return str(event.response_status) if event.response_status is not None else "ERR"
+      if key == "method":
+        return event.method
+      if key == "started_at":
+        return event.started_at
+      if key == "finished_at":
+        return event.finished_at
+      if key == "page":
+        return event.page
+      if key == "status_text":
+        return event.response_status_text or ""
+      if key == "ok":
+        return "Yes" if event.response_ok else "No"
+      if key == "request_headers":
+        return self._truncate(json.dumps(event.request_headers, ensure_ascii=False))
+      if key == "request_body":
+        return self._truncate(event.request_body_preview)
+      if key == "response_headers":
+        return self._truncate(json.dumps(event.response_headers, ensure_ascii=False))
+      if key == "response_body":
+        return self._truncate(event.response_body_preview)
+      if key == "response_error":
+        return self._truncate(event.response_body_error)
+      return ""
+
+    def _open_event_details_for_row(self, row: int, _column: int) -> None:
+      if row < 0 or row >= self.captured_table.rowCount():
+        return
+
+      cell_item = self.captured_table.item(row, 0)
+      if cell_item is None:
+        return
+
+      event = cell_item.data(Qt.ItemDataRole.UserRole)
+      if event is None:
+        return
+
+      dialog = QDialog(self)
+      dialog.setWindowTitle("Captured Call Details")
+      dialog.resize(860, 620)
+
+      dialog_layout = QVBoxLayout(dialog)
+
+      details_editor = QTextEdit(dialog)
+      details_editor.setReadOnly(True)
+      details_editor.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+      details_editor.setText(json.dumps(asdict(event), ensure_ascii=False, indent=2))
+
+      button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, parent=dialog)
+      button_box.rejected.connect(dialog.reject)
+
+      dialog_layout.addWidget(details_editor)
+      dialog_layout.addWidget(button_box)
+
+      dialog.exec()
 
     def navigate_to_input_url(self) -> None:
         raw = self.url_input.text().strip()
@@ -731,9 +858,14 @@ class XhrCollectorWindow(QMainWindow):
             return
 
         self.events.append(event)
-        status_label = str(event.response_status) if event.response_status is not None else "ERR"
-        item_text = f"[{event.api.upper()} {status_label}] {event.method} {event.url}"
-        self.captured_list.addItem(QListWidgetItem(item_text))
+        row = self.captured_table.rowCount()
+        self.captured_table.insertRow(row)
+
+        for column_index, (key, _title, _is_default_visible) in enumerate(self.table_columns):
+          item = QTableWidgetItem(self._column_value(event, key))
+          item.setData(Qt.ItemDataRole.UserRole, event)
+          self.captured_table.setItem(row, column_index, item)
+
         self.count_label.setText(f"Total: {len(self.events)}")
 
     def save_events(self) -> None:
@@ -792,7 +924,7 @@ class XhrCollectorWindow(QMainWindow):
 
     def clear_events(self) -> None:
         self.events.clear()
-        self.captured_list.clear()
+        self.captured_table.setRowCount(0)
         self.count_label.setText("Total: 0")
 
 
